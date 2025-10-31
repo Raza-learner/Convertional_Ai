@@ -13,6 +13,7 @@ import nltk
 import torch
 import warnings
 import logging
+ 
 
 # Suppress harmless warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -663,11 +664,9 @@ def test_stt():
 
 if __name__ == "__main__":
     print("AI Voice Assistant with Gemini started!")
-    
     if not GEMINI_AVAILABLE:
         print("Error: Gemini AI is not available. Please check your API key.")
         exit(1)
-    
     # Ask user what they want to do
     print("\nChoose an option:")
     print("1. Test STT functionality")
@@ -675,7 +674,6 @@ if __name__ == "__main__":
     print("3. Start voice conversation")
     print("4. Start text conversation")
     print("5. Calibrate microphone")
-    
     choice = input("Enter choice (1-5): ").strip()
     
     if choice == "1":
@@ -689,7 +687,7 @@ if __name__ == "__main__":
         print("🎯 TIPS: Speak clearly, close to microphone, watch audio levels!")
         print("Press Enter to record, Enter again to stop. Ctrl+C to exit.")
         print("=" * 60)
-        
+            
         try:
             while True:
                 print("\n🎤 Ready to record...")

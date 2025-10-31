@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI Voice Assistant</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <h1>AI Voice Assistant</h1>
+      <div class="status">
+        <span id="statusDot" class="dot idle"></span>
+        <span id="statusText">Idle</span>
+        <span id="timer" class="timer" hidden>00:00</span>
+      </div>
+    </header>
+
+    <div class="grid">
+      <div class="card full">
+        <div id="messages" class="messages"></div>
+        <div class="controls">
+          <input id="textInput" type="text" placeholder="Type your message..." />
+          <button id="sendBtn">Send</button>
+        </div>
+      </div>
+
+      <div class="card side">
+        <div class="mic-controls">
+          <button id="recBtn" class="primary">🎙️ Start Recording</button>
+          <button id="stopBtn" class="danger" disabled>⏹ Stop</button>
+        </div>
+        <div id="hint" class="hint">Tip: Use headphones and speak clearly near the mic.</div>
+        <audio id="playback" controls hidden></audio>
+      </div>
+    </div>
+  </div>
+
+<script>
+const messages = document.getElementById('messages');
+const textInput = document.getElementById('textInput');
+const sendBtn = document.getElementById('sendBtn');
+const recBtn = document.getElementById('recBtn');
+const stopBtn = document.getElementById('stopBtn');
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+const timerEl = document.getElementById('timer');
+const playback = document.getElementById('playback');
+
+function appendMsg(who, text) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + (who === 'You' ? 'you' : 'ai');
+  div.textContent = who + ': ' + text;
+  messages.appendChild(div);
+  messages.scrollTop = messages.scrollHeight;
+}
+
+sendBtn.onclick = async () => {
+  const text = textInput.value.trim();
+  if (!text) return;
+  textInput.value = '';
+  appendMsg('You', text);
+  const res = await fetch('/api/chat', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text}) });
+  const data = await res.json();
+  if (data.reply) {
+    appendMsg('AI', data.reply);
+    // Speak the AI reply as well for text messages
+    try {
+      const ttsRes = await fetch('/api/tts', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text: data.reply}) });
+      if (ttsRes.ok) {
+        const blob = await ttsRes.blob();
+        const url = URL.createObjectURL(blob);
+        playback.src = url;
+        playback.hidden = false;
+        await playback.play().catch(()=>{});
+      }
+    } catch {}
+  } else if (data.error) {
+    appendMsg('AI', 'Error: ' + data.error);
+  }
+};
+
+let mediaStream;
+let audioCtx;
+let processor;
+let sourceNode;
+let recording = false;
+let leftBuffers = [];
+let timerId;
+let startedAt;
+
+function formatTime(ms){
+  const s = Math.floor(ms/1000);
+  const m = Math.floor(s/60);
+  const ss = String(s%60).padStart(2,'0');
+  const mm = String(m).padStart(2,'0');
+  return `${mm}:${ss}`;
+}
+
+// WAV encoder (16-bit PCM, mono)
+function encodeWAV(buffers, sampleRate){
+  // Merge Float32 chunks
+  let totalLen = 0;
+  for (const b of buffers) totalLen += b.length;
+  const pcm16 = new Int16Array(totalLen);
+  let offset = 0;
+  for (const b of buffers){
+    for (let i=0; i<b.length; i++){
+      let s = Math.max(-1, Math.min(1, b[i]));
+      pcm16[offset++] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+  }
+  // WAV header (44 bytes)
+  const bytesPerSample = 2;
+  const blockAlign = 1 * bytesPerSample;
+  const byteRate = sampleRate * blockAlign;
+  const dataSize = pcm16.length * bytesPerSample;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+  let pos = 0;
+  function writeStr(s){ for(let i=0;i<s.length;i++) view.setUint8(pos++, s.charCodeAt(i)); }
+  function write32(v){ view.setUint32(pos, v, true); pos+=4; }
+  function write16(v){ view.setUint16(pos, v, true); pos+=2; }
+  writeStr('RIFF');
+  write32(36 + dataSize);
+  writeStr('WAVE');
+  writeStr('fmt ');
+  write32(16);
+  write16(1);           // PCM
+  write16(1);           // mono
+  write32(sampleRate);
+  write32(byteRate);
+  write16(blockAlign);
+  write16(16);          // bits per sample
+  writeStr('data');
+  write32(dataSize);
+  // PCM data
+  const out = new Int16Array(buffer, 44);
+  out.set(pcm16);
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+
+function setStatus(rec){
+  if(rec){
+    statusDot.className = 'dot rec';
+    statusText.textContent = 'Recording';
+    timerEl.hidden = false;
+    startedAt = Date.now();
+    timerEl.textContent = '00:00';
+    timerId = setInterval(()=>{
+      timerEl.textContent = formatTime(Date.now()-startedAt);
+    }, 200);
+  } else {
+    statusDot.className = 'dot idle';
+    statusText.textContent = 'Idle';
+    timerEl.hidden = true;
+    clearInterval(timerId);
+  }
+}
+
+recBtn.onclick = async () => {
+  try{
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio:true });
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    sourceNode = audioCtx.createMediaStreamSource(mediaStream);
+    processor = audioCtx.createScriptProcessor(4096, 1, 1);
+    leftBuffers = [];
+    processor.onaudioprocess = (e) => {
+      if (!recording) return;
+      const input = e.inputBuffer.getChannelData(0);
+      leftBuffers.push(new Float32Array(input));
+    };
+    sourceNode.connect(processor);
+    processor.connect(audioCtx.destination);
+    recording = true;
+    recBtn.disabled = true;
+    stopBtn.disabled = false;
+    setStatus(true);
+    appendMsg('System', 'Recording... click Stop when done.');
+  } catch(err){
+    appendMsg('System', 'Microphone error: ' + err.message);
+  }
+};
+
+stopBtn.onclick = async () => {
+  if (!recording) return;
+  recording = false;
+  try{
+    if (sourceNode) sourceNode.disconnect();
+    if (processor) processor.disconnect();
+    if (mediaStream) mediaStream.getTracks().forEach(t=>t.stop());
+  } catch {}
+  recBtn.disabled = false;
+  stopBtn.disabled = true;
+  setStatus(false);
+
+  // Build WAV and send
+  try{
+    const wavBlob = encodeWAV(leftBuffers, 16000);
+    leftBuffers = [];
+    const form = new FormData();
+    form.append('audio', wavBlob, 'audio.wav');
+    appendMsg('System', 'Transcribing...');
+    const res = await fetch('/api/transcribe', { method:'POST', body:form });
+    const data = await res.json();
+    if (data.transcript) appendMsg('You', data.transcript);
+    if (data.reply) {
+      appendMsg('AI', data.reply);
+      try {
+        const ttsRes = await fetch('/api/tts', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text: data.reply}) });
+        if (ttsRes.ok) {
+          const blob = await ttsRes.blob();
+          const url = URL.createObjectURL(blob);
+          playback.src = url;
+          playback.hidden = false;
+          await playback.play().catch(()=>{});
+        }
+      } catch {}
+    } else if (data.error) {
+      appendMsg('AI', 'Error: ' + data.error);
+    }
+  } catch(err){
+    appendMsg('System', 'Error: ' + err.message);
+  }
+};
+</script>
+</body>
+</html>
